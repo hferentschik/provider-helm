@@ -19,13 +19,15 @@ package release
 import (
 	"context"
 	"fmt"
-
-	"github.com/pkg/errors"
-	"helm.sh/helm/v3/pkg/strvals"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/yaml"
+	"regexp"
+	"strconv"
+	"strings"
 
 	"github.com/crossplane-contrib/provider-helm/apis/release/v1beta1"
+
+	"github.com/pkg/errors"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -39,6 +41,87 @@ const (
 	errFailedToGetValueFromSource     = "failed to get value from source"
 	errMissingValueForSet             = "missing value for --set"
 )
+
+var (
+	pathElemRegexp = regexp.MustCompile(`^(.+)\[(\d+)\]$`)
+)
+
+type pathElement struct {
+	name  string
+	index *int
+}
+
+func (p *pathElement) setValue(data map[string]interface{}, value string) {
+	if p.index == nil {
+		data[p.name] = value
+	} else {
+		var list []interface{}
+		_, exists := data[p.name]
+		if exists {
+			list = data[p.name].([]interface{})
+		} else {
+			list = []interface{}{}
+		}
+		data[p.name] = p.indexValue(list, *p.index, value)
+	}
+}
+
+func (p *pathElement) traverse(data map[string]interface{}) map[string]interface{} {
+	_, exists := data[p.name]
+	var v map[string]interface{}
+	if exists {
+		v = p.entry(data)
+	} else {
+		v = p.newEntry(data)
+	}
+
+	return v
+}
+
+func (p *pathElement) newEntry(data map[string]interface{}) map[string]interface{} {
+	tmp := map[string]interface{}{}
+	if p.index == nil {
+		data[p.name] = tmp
+	} else {
+		list := p.indexValue([]interface{}{}, *p.index, tmp)
+
+		data[p.name] = list
+	}
+	return tmp
+}
+
+func (p *pathElement) indexValue(list []interface{}, index int, val interface{}) []interface{} {
+	if len(list) <= index {
+		newList := make([]interface{}, index+1)
+		copy(newList, list)
+		list = newList
+	}
+	list[index] = val
+	return list
+}
+
+func (p *pathElement) entry(data map[string]interface{}) map[string]interface{} {
+	if p.index == nil {
+		return data[p.name].(map[string]interface{})
+	}
+	list := data[p.name].([]interface{})
+	return list[*p.index].(map[string]interface{})
+}
+
+func newPathElement(s string) (pathElement, error) {
+	matches := pathElemRegexp.FindStringSubmatch(s)
+	var elem pathElement
+	if matches == nil {
+		elem = pathElement{name: s}
+	} else {
+		index, _ := strconv.Atoi(matches[2])
+		if index < 0 {
+			return pathElement{}, fmt.Errorf("negative %d index not allowed", index)
+		}
+		elem = pathElement{name: matches[1], index: &index}
+	}
+	return elem, nil
+}
 
 func composeValuesFromSpec(ctx context.Context, kube client.Client, spec v1beta1.ValuesSpec) (map[string]interface{}, error) {
 	base := map[string]interface{}{}
@@ -80,12 +163,29 @@ func composeValuesFromSpec(ctx context.Context, kube client.Client, spec v1beta1
 			return nil, errors.New(errMissingValueForSet)
 		}
 
-		if err := strvals.ParseInto(fmt.Sprintf("%s=%s", s.Name, v), base); err != nil {
+		if err := setValue(s.Name, base, v); err != nil {
 			return nil, errors.Wrap(err, errFailedParsingSetData)
 		}
 	}
 
 	return base, nil
+}
+
+func setValue(name string, data map[string]interface{}, value string) error {
+	pathElements := strings.Split(name, ".")
+	v := data
+	for i, pathElement := range pathElements {
+		elem, err := newPathElement(pathElement)
+		if err != nil {
+			return errors.Wrap(err, "unable to create path element")
+		}
+		if i == len(pathElements)-1 {
+			elem.setValue(v, value)
+		} else {
+			v = elem.traverse(v)
+		}
+	}
+	return nil
 }
 
 // Copied from helm cli

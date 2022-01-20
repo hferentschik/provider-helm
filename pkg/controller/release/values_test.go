@@ -15,6 +15,22 @@ import (
 	"github.com/crossplane-contrib/provider-helm/apis/release/v1beta1"
 )
 
+const (
+	testCredentialKey = `{
+  "type": "service_account",
+  "project_id": "acme",
+  "private_key_id": "e402084281cfe537a99a1c225bdaf2c637a20d2b",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC8oQXL46PgjYJu\n-----END PRIVATE KEY-----\n",
+  "client_email": "crossplane-sa@acme.iam.gserviceaccount.com",
+  "client_id": "1",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/crossplane-sa%40acme.iam.gserviceaccount.com"
+}
+`
+)
+
 func Test_composeValuesFromSpec(t *testing.T) {
 	type args struct {
 		kube client.Client
@@ -315,6 +331,124 @@ keyB:
 				err: errors.Wrap(errors.Wrap(errors.Wrap(errBoom, fmt.Sprintf(errFailedToGetSecret, testNamespace)),
 					errFailedToGetDataFromSecretRef),
 					errFailedToGetValueFromSource),
+			},
+		},
+		"SetFromMultiLineSecret": {
+			args: args{
+				kube: &test.MockClient{
+					MockGet: func(ctx context.Context, key client.ObjectKey, obj client.Object) error {
+						if key.Name == testSecretName && key.Namespace == testNamespace {
+							s := corev1.Secret{
+								Data: map[string][]byte{
+									"credentials.json": []byte(testCredentialKey),
+								},
+							}
+							*obj.(*corev1.Secret) = s
+							return nil
+						}
+						return errBoom
+					},
+				},
+				spec: v1beta1.ValuesSpec{
+					ValuesFrom: nil,
+					Set: []v1beta1.SetVal{
+						{
+							Name: "credentials",
+							ValueFrom: &v1beta1.ValueFromSource{
+								SecretKeyRef: &v1beta1.DataKeySelector{
+									NamespacedName: v1beta1.NamespacedName{
+										Name:      testSecretName,
+										Namespace: testNamespace,
+									},
+									Key:      "credentials.json",
+									Optional: false,
+								},
+							},
+						},
+					},
+				},
+			},
+			want: want{
+				out: map[string]interface{}{
+					"credentials": testCredentialKey,
+				},
+				err: nil,
+			},
+		},
+		"NestedPathWithSet": {
+			args: args{
+				kube: &test.MockClient{
+					MockGet: nil,
+				},
+				spec: v1beta1.ValuesSpec{
+					ValuesFrom: nil,
+					Set: []v1beta1.SetVal{
+						{
+							Name:  "foo.bar",
+							Value: "valX",
+						},
+					},
+				},
+			},
+			want: want{
+				out: map[string]interface{}{
+					"foo": map[string]interface{}{
+						"bar": "valX",
+					},
+				},
+				err: nil,
+			},
+		},
+		"NestedPathWithIndexWithSet": {
+			args: args{
+				kube: &test.MockClient{
+					MockGet: nil,
+				},
+				spec: v1beta1.ValuesSpec{
+					ValuesFrom: nil,
+					Set: []v1beta1.SetVal{
+						{
+							Name:  "foo[1].bar",
+							Value: "valX",
+						},
+					},
+				},
+			},
+			want: want{
+				out: map[string]interface{}{
+					"foo": []interface{}{
+						nil,
+						map[string]interface{}{
+							"bar": "valX",
+						},
+					}},
+				err: nil,
+			},
+		},
+		"NestedPathWithIndexValue": {
+			args: args{
+				kube: &test.MockClient{
+					MockGet: nil,
+				},
+				spec: v1beta1.ValuesSpec{
+					ValuesFrom: nil,
+					Set: []v1beta1.SetVal{
+						{
+							Name:  "foo.bar[0]",
+							Value: "valX",
+						},
+					},
+				},
+			},
+			want: want{
+				out: map[string]interface{}{
+					"foo": map[string]interface{}{
+						"bar": []interface{}{
+							"valX",
+						},
+					},
+				},
+				err: nil,
 			},
 		},
 	}
